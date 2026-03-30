@@ -176,6 +176,9 @@ python evaluation/eval_retargeting.py --res_dir demo_results_parallel/g1/climbin
 
 # Evaluate robot only (OMOMO)
 python evaluation/eval_retargeting.py --res_dir demo_results_parallel/g1/robot_only/omomo --data_dir demo_data/OMOMO_new --data_type "robot_only"
+
+# Evaluate obstacle avoidance with a static obstacle offset
+python evaluation/eval_retargeting.py --res_dir demo_results/g1/obstacle_avoidance/mybvh --data_dir demo_data/lafan --data_type "robot_obstacle" --data_format lafan --object_name box_15x150x15cm --obstacle-pos 0.036 -1.700 0.0
 ```
 
 ## Prepare Data for Training RL Whole-Body Tracking Policy

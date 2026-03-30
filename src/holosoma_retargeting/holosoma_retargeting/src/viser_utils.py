@@ -20,6 +20,7 @@ def create_motion_control_sliders(
     viser_object: ViserUrdf | None = None,
     object_base_frame: viser.FrameHandle | None = None,
     contains_object_in_qpos: bool = True,
+    static_object_pos: np.ndarray | None = None,
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
     loop: bool = True,
@@ -149,8 +150,8 @@ def create_motion_control_sliders(
             prev["obj_q"] = o_q
             object_base_frame.wxyz = o_q
         elif object_base_frame is not None and viser_object is not None:
-            # fallback static pose
-            object_base_frame.position = np.zeros(3)
+            # fallback static pose — use provided position if available
+            object_base_frame.position = np.asarray(static_object_pos, dtype=float) if static_object_pos is not None else np.zeros(3)
             object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
 
     def _apply_discrete_frame(i: int) -> None:

@@ -35,6 +35,7 @@ from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]  
     create_new_scene_xml_file,
     create_scaled_multi_boxes_xml,
     extract_foot_sticking_sequence_velocity,
+    generate_static_obstacle_scene_xml,
     load_intermimic_data,
     preprocess_motion_data,
     transform_points_world_to_local,
@@ -121,8 +122,9 @@ class RetargetingEvaluator:
         # Load Mujoco model
         if self.object_name == "ground":
             robot_xml_path = robot_model_path.replace(".urdf", ".xml")
-        elif self.object_name == "multi_boxes":
-            robot_xml_path = constants.SCENE_XML_FILE  # type: ignore[attr-defined]
+        elif hasattr(constants, "SCENE_XML_FILE") and constants.SCENE_XML_FILE:
+            # Covers multi_boxes (climbing) and generated obstacle scene XMLs
+            robot_xml_path = constants.SCENE_XML_FILE
         else:
             robot_xml_path = robot_model_path.replace(".urdf", "_w_" + self.object_name + ".xml")
 
@@ -566,6 +568,55 @@ class RetargetingEvaluator:
             "opt_cost": opt_cost,
         }
 
+    def evaluate_obstacle_avoidance_trajectory(self, task_name, data_dir, input_data_dir):
+        """Evaluate obstacle-avoidance retargeting trajectory (LAFAN flat .npy format).
+
+        Checks:
+          1. penetration depth / duration against the static obstacle
+          2. foot sliding
+
+        Returns:
+            dict with penetration, sliding, and optimisation-cost metrics.
+        """
+        try:
+            rt_res_data = np.load(f"{data_dir}", allow_pickle=True)
+            q_retarget = rt_res_data["qpos"]
+        except (OSError, KeyError, ValueError):
+            return None
+
+        # Obstacle geoms are part of the scene XML — penetration check just works
+        penetration_duration, penetration_max_depths = self.evaluate_penetration(q_retarget)
+
+        # Load LAFAN motion for foot-sliding detection
+        data_name = task_name.split("_original")[0]
+        npy_path = Path(input_data_dir) / f"{data_name}.npy"
+        if not npy_path.exists():
+            raise FileNotFoundError(f"LAFAN .npy not found: {npy_path}")
+
+        toe_names = ["LeftToeBase", "RightToeBase"]
+        human_joints = np.load(str(npy_path))
+        human_joints = transform_y_up_to_z_up(human_joints)
+        spine_joint_idx = self.demo_joints.index("Spine1")
+        human_joints[:, spine_joint_idx, -1] -= 0.06
+        smpl_scale = getattr(self.constants, "DEFAULT_SCALE_FACTOR", None) or 1.0
+        human_joints = preprocess_motion_data(human_joints, self, toe_names, smpl_scale)
+
+        contact_sequences = extract_foot_sticking_sequence_velocity(
+            human_joints, self.demo_joints, toe_names
+        )
+        sliding_duration, max_toe_sliding_velocities = self.detect_foot_sliding(
+            q_retarget, contact_sequences[: q_retarget.shape[0]]
+        )
+
+        opt_cost = rt_res_data["cost"]
+        return {
+            "penetration_duration": penetration_duration,
+            "penetration_max_depths": penetration_max_depths,
+            "sliding_duration": sliding_duration,
+            "max_toe_sliding_velocities": max_toe_sliding_velocities,
+            "opt_cost": opt_cost,
+        }
+
     def evaluate_robot_only_trajectory(self, task_name, data_dir, input_data_dir):
         """
         Evaluate a complete retargeting trajectory.
@@ -609,10 +660,12 @@ class RetargetingEvaluator:
                 # Just scale without normalization (smplh data doesn't need height normalization)
                 human_joints = human_joints * smpl_scale
         elif npy_path.exists():
-            # LAFAN data format
+            # LAFAN / mybvh data format
             toe_names = ["LeftToeBase", "RightToeBase"]
             human_joints = np.load(str(npy_path))
             human_joints = transform_y_up_to_z_up(human_joints)
+            if getattr(self.constants, "DATA_FORMAT", None) == "mybvh":
+                human_joints[:, :, 1] *= -1
             spine_joint_idx = self.demo_joints.index("Spine1")
             # LAFAN-specific spine adjustment
             human_joints[:, spine_joint_idx, -1] -= 0.06
@@ -651,6 +704,7 @@ def _evaluate_single_task(
     motion_data_config_kwargs: Dict[str, Any],
     object_name: str | None,
     data_type: str,
+    obstacle_pos: tuple[float, float, float] | None,
 ):
     robot_config = RobotConfig(**robot_config_kwargs)
     motion_data_config = MotionDataConfig(**motion_data_config_kwargs)
@@ -660,6 +714,8 @@ def _evaluate_single_task(
         motion_data_config,
         object_name=object_name,
     )
+    if obstacle_pos is not None:
+        constants.OBSTACLE_POS = tuple(obstacle_pos)
 
     if data_type == "robot_terrain":
         # For robot_terrain task
@@ -686,6 +742,21 @@ def _evaluate_single_task(
         )
         constants.SCENE_XML_FILE = new_scene_xml_path
 
+    elif data_type == "robot_obstacle":
+        # Obstacle avoidance: generate a combined MuJoCo scene XML on the fly
+        robot_base_xml = constants.ROBOT_URDF_FILE.replace(".urdf", ".xml")
+        output_xml_path = constants.ROBOT_URDF_FILE.replace(
+            ".urdf", f"_w_{constants.OBJECT_NAME}.xml"
+        )
+        generate_static_obstacle_scene_xml(
+            robot_xml_path=robot_base_xml,
+            obstacle_obj_path=constants.OBJECT_MESH_FILE,
+            obstacle_name=constants.OBJECT_NAME,
+            output_path=output_xml_path,
+            obstacle_pos=tuple(obstacle_pos) if obstacle_pos is not None else (0.0, 0.0, 0.0),
+        )
+        constants.SCENE_XML_FILE = output_xml_path
+
     object_model_path: str | None = getattr(constants, "OBJECT_URDF_FILE", None)
 
     evaluator = RetargetingEvaluator(
@@ -703,6 +774,8 @@ def _evaluate_single_task(
         return task_name, evaluator.evaluate_robot_only_trajectory(task_name, data_path, input_data_dir)
     if data_type == "robot_terrain":
         return task_name, evaluator.evaluate_robot_terrain_trajectory(task_name, data_path, input_data_dir)
+    if data_type == "robot_obstacle":
+        return task_name, evaluator.evaluate_obstacle_avoidance_trajectory(task_name, data_path, input_data_dir)
     raise ValueError(f"Invalid data type: {data_type}")
 
 
@@ -711,7 +784,7 @@ def get_task_names(data_dir, data_type):
     if data_type == "robot_object":
         files = sorted(data_path.glob("*_original.npz"))
         task_names = [p.name.replace("_original.npz", "") for p in files]
-    elif data_type == "robot_only":
+    elif data_type in ("robot_only", "robot_obstacle"):
         files = sorted(data_path.glob("*.npz"))
         task_names = [p.name.replace(".npz", "") for p in files]
     elif data_type == "robot_terrain":
@@ -729,10 +802,11 @@ class Args:
 
     res_dir: Path
     data_dir: Path
-    data_type: Literal["robot_object", "robot_only", "robot_terrain"] = "robot_object"
+    data_type: Literal["robot_object", "robot_only", "robot_terrain", "robot_obstacle"] = "robot_object"
     robot: str = "g1"  # Use str to allow dynamic robot types
     data_format: str | None = None  # Use str to allow dynamic data formats
     object_name: str | None = None
+    obstacle_pos: tuple[float, float, float] | None = None
     max_workers: int = 1
 
     # Nested configs for overrides
@@ -747,6 +821,7 @@ def main(cfg: Args) -> None:
         "robot_object": "smplh",
         "robot_only": "smplh",
         "robot_terrain": "mocap",
+        "robot_obstacle": "lafan",
     }
 
     data_format = cfg.data_format or default_data_formats[cfg.data_type]
@@ -768,6 +843,8 @@ def main(cfg: Args) -> None:
         object_name = "largebox"
     elif cfg.data_type == "robot_terrain":
         object_name = "multi_boxes"
+    elif cfg.data_type == "robot_obstacle":
+        object_name = "box_15x150x15cm"
     else:
         # Default to "ground" for robot-only scenarios (matches robot defaults)
         object_name = "ground"
@@ -791,6 +868,7 @@ def main(cfg: Args) -> None:
                 motion_data_config_kwargs,
                 object_name,
                 cfg.data_type,
+                cfg.obstacle_pos,
             ): task_name
             for task_name, file_path in zip(task_names, files)
         }

@@ -89,8 +89,10 @@ def make_player(
         robot_base_frame=robot_root,
         motion_sequence=qpos,
         robot_dof=robot_dof,
-        viser_object=vo if config.assume_object_in_qpos else None,
-        object_base_frame=object_root if config.assume_object_in_qpos else None,
+        # Pass vo/object_root whenever an object URDF is loaded so static obstacles
+        # (assume_object_in_qpos=False) are displayed fixed at the origin.
+        viser_object=vo,
+        object_base_frame=object_root if vo is not None else None,
         contains_object_in_qpos=config.assume_object_in_qpos,
         initial_fps=actual_fps,
         initial_interp_mult=config.visual_fps_multiplier,

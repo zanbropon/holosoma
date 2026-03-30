@@ -3,6 +3,7 @@ Unified robot retargeting script for all task types:
 - robot_only: Robot-only retargeting with ground interaction
 - object_interaction: Object manipulation retargeting (InterMimic)
 - climbing: Climbing retargeting with dynamic terrain
+- obstacle_avoidance: Step-over obstacle retargeting (LAFAN flat .npy + static obstacle mesh)
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from holosoma_retargeting.src.utils import (  # noqa: E402
     augment_object_poses,
     calculate_scale_factor,
     create_new_scene_xml_file,
+    generate_static_obstacle_scene_xml,
     create_scaled_multi_boxes_urdf,
     create_scaled_multi_boxes_xml,
     estimate_human_orientation,
@@ -56,12 +58,14 @@ DEFAULT_DATA_FORMATS = {
     "robot_only": "smplh",
     "object_interaction": "smplh",
     "climbing": "mocap",
+    "obstacle_avoidance": "lafan",
 }
 
 DEFAULT_SAVE_DIRS = {
     "robot_only": "demo_results/{robot}/robot_only/omomo",
     "object_interaction": "demo_results/{robot}/object_interaction/omomo",
     "climbing": "demo_results/{robot}/climbing/mocap_climb",
+    "obstacle_avoidance": "demo_results/{robot}/obstacle_avoidance/lafan",
 }
 
 
@@ -72,7 +76,7 @@ _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
 
 # Type aliases
-TaskType = Literal["robot_only", "object_interaction", "climbing"]
+TaskType = Literal["robot_only", "object_interaction", "climbing", "obstacle_avoidance"]
 # DataFormat is imported from config_types.data_type
 
 
@@ -127,6 +131,12 @@ def create_task_constants(
         task_constants.OBJECT_URDF_FILE = str(object_dir / f"{obj_name}.urdf") if object_dir else f"{obj_name}.urdf"
         task_constants.OBJECT_MESH_FILE = str(object_dir / f"{obj_name}.obj") if object_dir else f"{obj_name}.obj"
         task_constants.SCENE_XML_FILE = ""  # Will be set later
+    elif task_type == "obstacle_avoidance":
+        obj_name = task_config.object_name or "box_15x150x15cm"
+        task_constants.OBJECT_NAME = obj_name
+        task_constants.OBJECT_URDF_FILE = f"models/{obj_name}/{obj_name}.urdf"
+        task_constants.OBJECT_MESH_FILE = f"models/{obj_name}/{obj_name}.obj"
+        task_constants.OBSTACLE_POS = tuple(task_config.obstacle_pos)
 
     return task_constants
 
@@ -154,6 +164,8 @@ def validate_config(cfg: RetargetingConfig) -> None:
         raise ValueError("Climbing task requires 'mocap' data format")
     if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh"):
         raise ValueError("Object interaction requires 'smplh' data format")
+    if cfg.task_type == "obstacle_avoidance" and cfg.data_format not in (None, "lafan", "mybvh"):
+        raise ValueError("obstacle_avoidance task requires 'lafan' or 'mybvh' data format")
     # robot_only accepts any format in the registry (already validated above)
 
 
@@ -204,15 +216,19 @@ def load_motion_data(
     logger.info("Loading motion data for task: %s, format: %s", task_name, data_format)
 
     if task_type == "robot_only":
-        if data_format == "lafan":
+        if data_format in ("lafan", "mybvh"):
             npy_path = data_path / f"{task_name}.npy"
             if not npy_path.exists():
-                raise FileNotFoundError(f"LAFAN data file not found: {npy_path}")
+                raise FileNotFoundError(f"{data_format.upper()} data file not found: {npy_path}")
 
             human_joints = np.load(str(npy_path))
             human_joints = transform_y_up_to_z_up(human_joints)
+            if data_format == "mybvh":
+                # This BVH family moves forward along the opposite horizontal axis after Y-up -> Z-up conversion.
+                # Flip the forward axis so base translation direction matches the visual walking direction.
+                human_joints[:, :, 1] *= -1
             spine_joint_idx = constants.DEMO_JOINTS.index("Spine1")
-            # LAFAN-specific spine adjustment
+            # Y-up BVH spine adjustment
             human_joints[:, spine_joint_idx, -1] -= 0.06
             smpl_scale = motion_data_config.default_scale_factor or 1.0
         elif data_format == "smplh":  # smplh
@@ -276,6 +292,22 @@ def load_motion_data(
         default_human_height = motion_data_config.default_human_height or 1.78
         smpl_scale = constants.ROBOT_HEIGHT / default_human_height
 
+    elif task_type == "obstacle_avoidance":
+        # LAFAN flat .npy — same loading logic as robot_only/lafan branch
+        npy_path = data_path / f"{task_name}.npy"
+        if not npy_path.exists():
+            raise FileNotFoundError(f"LAFAN data file not found: {npy_path}")
+        human_joints = np.load(str(npy_path))
+        human_joints = transform_y_up_to_z_up(human_joints)
+        if data_format == "mybvh":
+            human_joints[:, :, 1] *= -1
+        spine_joint_idx = constants.DEMO_JOINTS.index("Spine1")
+        human_joints[:, spine_joint_idx, -1] -= 0.06
+        smpl_scale = motion_data_config.default_scale_factor or 1.0
+        # Obstacle is static — identity pose for every frame
+        num_frames = human_joints.shape[0]
+        object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
+
     logger.debug(
         "Loaded %d frames, scale factor: %.4f",
         human_joints.shape[0],
@@ -324,6 +356,32 @@ def setup_object_data(
             constants.OBJECT_MESH_FILE, smpl_scale=smpl_scale, sample_count=100
         )
         return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
+
+    if task_type == "obstacle_avoidance":
+        robot_xml_path = str(Path(constants.ROBOT_URDF_FILE).with_suffix(".xml"))
+        scene_xml_path = str(Path(robot_xml_path).with_name(f"{Path(robot_xml_path).stem}_w_{constants.OBJECT_NAME}.xml"))
+        constants.SCENE_XML_FILE = generate_static_obstacle_scene_xml(
+            robot_xml_path=robot_xml_path,
+            obstacle_obj_path=constants.OBJECT_MESH_FILE,
+            obstacle_name=constants.OBJECT_NAME,
+            output_path=scene_xml_path,
+            obstacle_pos=task_config.obstacle_pos,
+        )
+        # Sample obstacle surface points (mesh-local frame, centered at origin)
+        obstacle_pts, obstacle_pts_demo = load_object_data(
+            constants.OBJECT_MESH_FILE, smpl_scale=smpl_scale, sample_count=50
+        )
+        # Shift into world frame: obstacle_avoidance uses identity object_poses,
+        # so "object frame" == world frame; the obstacle sits at obstacle_pos.
+        obs_offset = np.asarray(task_config.obstacle_pos, dtype=float)
+        obstacle_pts_world = obstacle_pts + obs_offset
+        obstacle_pts_demo_world = obstacle_pts_demo + obs_offset
+
+        # Ground points for foot sticking + obstacle surface points for Laplacian mesh
+        ground_pts = create_ground_points(task_config.ground_range, task_config.ground_range, task_config.ground_size)
+        combined_pts = np.vstack([ground_pts, obstacle_pts_world])
+        combined_pts_demo = np.vstack([ground_pts, obstacle_pts_demo_world])
+        return combined_pts, combined_pts_demo, constants.OBJECT_URDF_FILE
 
     if task_type == "climbing":
         if object_dir is None:
@@ -393,8 +451,8 @@ def _compute_q_init_base(
     Returns:
         q_init_base in MuJoCo order: [0:3] position, [3:7] quaternion, [7:] joints
     """
-    if task_type == "robot_only":
-        if data_format == "lafan":
+    if task_type in ("robot_only", "obstacle_avoidance"):
+        if data_format in ("lafan", "mybvh"):
             spine_joint_idx = constants.DEMO_JOINTS.index("Spine1")
             human_quat_init = estimate_human_orientation(human_joints, constants.DEMO_JOINTS)
             # MuJoCo order: pos first, then quat
@@ -519,7 +577,7 @@ def initialize_robot_pose(
         augmentation_translation = _AUGMENTATION_TRANSLATION
     logger.info("Initializing robot pose")
 
-    if task_type == "robot_only":
+    if task_type in ("robot_only", "obstacle_avoidance"):
         q_init = _compute_q_init_base(task_type, data_format, human_joints, object_poses, constants)
         object_poses = convert_object_poses_to_mujoco_order(object_poses)
         return q_init, None, object_poses, human_joints, object_poses
@@ -586,7 +644,7 @@ def determine_output_path(
     Returns:
         Output file path
     """
-    if task_type == "robot_only":
+    if task_type in ("robot_only", "obstacle_avoidance"):
         return str(save_dir / f"{task_name}.npz")
     if task_type in ("object_interaction", "climbing"):
         suffix = "_augmented" if augmentation else "_original"
@@ -663,7 +721,7 @@ def main(cfg: RetargetingConfig) -> None:
     logger.info("Retargeter created")
 
     # Preprocess motion data
-    if task_type == "robot_only":
+    if task_type in ("robot_only", "obstacle_avoidance"):
         human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
     elif task_type in {"object_interaction", "climbing"}:
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(

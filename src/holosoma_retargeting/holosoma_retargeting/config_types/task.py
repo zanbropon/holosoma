@@ -37,3 +37,7 @@ class TaskConfig:
     # Object directory (for climbing tasks)
     # Auto-determined from data_path / task_name if None
     object_dir: Path | None = None
+
+    # Static obstacle world position (obstacle_avoidance task)
+    # Default keeps previous behavior (place obstacle at world origin).
+    obstacle_pos: tuple[float, float, float] = (0.0, 0.0, 0.0)

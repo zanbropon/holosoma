@@ -817,3 +817,60 @@ def estimate_human_orientation(human_joints, joint_names, frame_idx=0):
     assert np.linalg.det(rotation_matrix) > 0
     rotation = R.from_matrix(rotation_matrix)
     return rotation.as_quat(scalar_first=True)
+
+
+def generate_static_obstacle_scene_xml(
+    robot_xml_path: str,
+    obstacle_obj_path: str,
+    obstacle_name: str,
+    output_path: str,
+    obstacle_pos: tuple = (0.0, 0.0, 0.0),
+) -> str:
+    """Generate a MuJoCo MJCF scene XML combining a robot with a static obstacle.
+
+    The obstacle body has no free joint, so it is fixed to the world frame.
+    Always rewrites ``output_path`` so obstacle position changes take effect immediately.
+
+    Args:
+        robot_xml_path: Base robot MJCF XML (e.g. ``models/g1/g1_29dof.xml``).
+        obstacle_obj_path: Path to the obstacle ``.obj`` mesh file.
+        obstacle_name: Name used for the body / geom / mesh asset in the XML.
+        output_path: Where to write the generated combined XML.
+        obstacle_pos: (x, y, z) world-frame position of the obstacle.
+
+    Returns:
+        ``output_path`` (unchanged if the file already existed).
+    """
+    import os
+
+    abs_obj = os.path.abspath(obstacle_obj_path)
+    pos_str = f"{obstacle_pos[0]} {obstacle_pos[1]} {obstacle_pos[2]}"
+
+    # Mesh asset entry (absolute path so the XML can live anywhere)
+    mesh_snippet = f'  <mesh name="{obstacle_name}_mesh" file="{abs_obj}" scale="1 1 1"/>\n'
+
+    # Static body – no joint means it is welded to the world
+    body_snippet = (
+        f'    <body name="{obstacle_name}" pos="{pos_str}">\n'
+        f'      <inertial pos="0 0 0" mass="10" diaginertia="1 1 1"/>\n'
+        f'      <geom name="{obstacle_name}" type="mesh"'
+        f' mesh="{obstacle_name}_mesh" rgba="0.9 0.6 0.2 0.8"/>\n'
+        f'    </body>\n'
+    )
+
+    with open(robot_xml_path) as f:
+        content = f.read()
+
+    # Inject mesh into the FIRST </asset> block
+    first_asset_end = content.index("</asset>")
+    content = content[:first_asset_end] + mesh_snippet + content[first_asset_end:]
+
+    # Inject static body right before </worldbody>
+    worldbody_end = content.rindex("</worldbody>")
+    content = content[:worldbody_end] + body_snippet + content[worldbody_end:]
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        f.write(content)
+
+    return output_path

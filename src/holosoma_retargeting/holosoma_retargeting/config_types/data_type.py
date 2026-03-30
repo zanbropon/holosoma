@@ -173,6 +173,72 @@ SMPLX_DEMO_JOINTS = [
     "R_Wrist",
 ]
 
+# Custom format: BVH skeleton with two pseudo toe joints appended from End Sites.
+# Joint order must match the BVH HIERARCHY traversal order exactly.
+MYBVH_DEMO_JOINTS = [
+    "Hips",           # 0
+    "RightUpLeg",    # 1
+    "RightLeg",      # 2
+    "RightFoot",     # 3
+    "LeftUpLeg",     # 4
+    "LeftLeg",       # 5
+    "LeftFoot",      # 6
+    "Spine",         # 7
+    "Spine1",        # 8
+    "Spine2",        # 9
+    "Neck",          # 10
+    "Neck1",         # 11
+    "Head",          # 12
+    "RightShoulder", # 13
+    "RightArm",      # 14
+    "RightForeArm",  # 15
+    "RightHand",     # 16
+    "RightHandThumb1",   # 17
+    "RightHandThumb2",   # 18
+    "RightHandThumb3",   # 19
+    "RightInHandIndex",  # 20
+    "RightHandIndex1",   # 21
+    "RightHandIndex2",   # 22
+    "RightHandIndex3",   # 23
+    "RightInHandMiddle", # 24
+    "RightHandMiddle1",  # 25
+    "RightHandMiddle2",  # 26
+    "RightHandMiddle3",  # 27
+    "RightInHandRing",   # 28
+    "RightHandRing1",    # 29
+    "RightHandRing2",    # 30
+    "RightHandRing3",    # 31
+    "RightInHandPinky",  # 32
+    "RightHandPinky1",   # 33
+    "RightHandPinky2",   # 34
+    "RightHandPinky3",   # 35
+    "LeftShoulder",  # 36
+    "LeftArm",       # 37
+    "LeftForeArm",   # 38
+    "LeftHand",      # 39
+    "LeftHandThumb1",   # 40
+    "LeftHandThumb2",   # 41
+    "LeftHandThumb3",   # 42
+    "LeftInHandIndex",  # 43
+    "LeftHandIndex1",   # 44
+    "LeftHandIndex2",   # 45
+    "LeftHandIndex3",   # 46
+    "LeftInHandMiddle", # 47
+    "LeftHandMiddle1",  # 48
+    "LeftHandMiddle2",  # 49
+    "LeftHandMiddle3",  # 50
+    "LeftInHandRing",   # 51
+    "LeftHandRing1",    # 52
+    "LeftHandRing2",    # 53
+    "LeftHandRing3",    # 54
+    "LeftInHandPinky",  # 55
+    "LeftHandPinky1",   # 56
+    "LeftHandPinky2",   # 57
+    "LeftHandPinky3",   # 58
+    "LeftToeBase",      # 59 (pseudo joint from LeftFoot End Site)
+    "RightToeBase",     # 60 (pseudo joint from RightFoot End Site)
+]
+
 # Joint mappings - organized by (data_format, robot_type)
 JOINTS_MAPPINGS = {
     ("lafan", "g1"): {
@@ -294,6 +360,24 @@ JOINTS_MAPPINGS = {
         "LeftFoot": "Ankle_Cross_Left",
         "RightFoot": "Ankle_Cross_Right",
     },
+    # mybvh: pseudo toe joints are generated during BVH->NPY conversion from End Sites
+    ("mybvh", "g1"): {
+        "Spine1": "pelvis_contour_link",
+        "LeftUpLeg": "left_hip_pitch_link",
+        "RightUpLeg": "right_hip_pitch_link",
+        "LeftLeg": "left_knee_link",
+        "RightLeg": "right_knee_link",
+        "LeftArm": "left_shoulder_roll_link",
+        "RightArm": "right_shoulder_roll_link",
+        "LeftForeArm": "left_elbow_link",
+        "RightForeArm": "right_elbow_link",
+        "LeftFoot": "left_ankle_intermediate_1_link",
+        "RightFoot": "right_ankle_intermediate_1_link",
+        "LeftToeBase": "left_ankle_roll_sphere_5_link",
+        "RightToeBase": "right_ankle_roll_sphere_5_link",
+        "LeftHand": "left_rubber_hand_link",
+        "RightHand": "right_rubber_hand_link",
+    },
 }
 
 # Data format specific constants
@@ -302,6 +386,7 @@ TOE_NAMES_BY_FORMAT = {
     "smplh": ["L_Toe", "R_Toe"],
     "mocap": ["LeftToeBase", "RightToeBase"],
     "smplx": ["L_Foot", "R_Foot"],
+    "mybvh": ["LeftToeBase", "RightToeBase"],
 }
 
 
@@ -318,6 +403,9 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
     "mocap": {
         "default_human_height": 1.78,
     },
+    "mybvh": {
+        "default_scale_factor": 1.27 / 1.7,  # BVH in cm/100=m; assume ~1.7m subject → g1 (1.27m)
+    },
 }
 
 # Unified registry: Maps format name to demo joints
@@ -328,6 +416,7 @@ DEMO_JOINTS_REGISTRY: dict[str, list[str]] = {
     "smplh": SMPLH_DEMO_JOINTS,
     "mocap": MOCAP_DEMO_JOINTS,
     "smplx": SMPLX_DEMO_JOINTS,
+    "mybvh": MYBVH_DEMO_JOINTS,
 }
 
 # Type alias for data formats - use str to allow dynamic data formats via DEMO_JOINTS_REGISTRY
@@ -420,4 +509,5 @@ class MotionDataConfig:
             "TOE_NAMES": self.toe_names,
             "DEFAULT_SCALE_FACTOR": self.default_scale_factor,
             "DEFAULT_HUMAN_HEIGHT": self.default_human_height,
+            "DATA_FORMAT": self.data_format,
         }

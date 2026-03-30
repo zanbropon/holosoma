@@ -115,7 +115,7 @@ class InteractionMeshRetargeter:
         # Load Mujoco model
         if self.object_name == "ground":
             robot_xml_path = self.robot_model_path.replace(".urdf", ".xml")
-        elif self.object_name == "multi_boxes":
+        elif hasattr(self.task_constants, "SCENE_XML_FILE") and self.task_constants.SCENE_XML_FILE:
             robot_xml_path = self.task_constants.SCENE_XML_FILE
         else:
             robot_xml_path = self.robot_model_path.replace(".urdf", "_w_" + self.object_name + ".xml")
@@ -363,6 +363,10 @@ class InteractionMeshRetargeter:
         tetrahedra = []
         obj_pts_demo_list = []  # scaled object pts
         obj_pts_list = []  # original size object pts
+        human_kpts_handle_list = []
+        obj_kpts_demo_handle_list = []
+        obj_kpts_handle_list = []
+        robot_kpts_handle_list = []
 
         print(f"\nStarting motion retargeting for {num_frames} frames...")
 
@@ -387,7 +391,7 @@ class InteractionMeshRetargeter:
                 )
                 tetrahedra.append(source_tetrahedra)
 
-                if self.debug:
+                if self.debug and self.visualize:
                     # Only for visualization
                     object_quat = object_poses_augmented[i, 3:]
                     object_trans = object_poses_augmented[i, :3]
@@ -430,7 +434,7 @@ class InteractionMeshRetargeter:
                     n_iter=50 if i == 0 else 10,
                     frame_idx=i,
                 )
-                if self.debug:
+                if self.debug and self.visualize:
                     robot_link_positions = self._get_robot_link_positions(
                         q, self.laplacian_match_links.values()
                     )  # 15 X 3
@@ -445,7 +449,7 @@ class InteractionMeshRetargeter:
                 pbar.set_postfix(cost=cost)
 
         # Remove previous debug visualization
-        if self.debug:
+        if self.debug and self.visualize:
             for handle in human_kpts_handle_list:
                 handle.remove()
             human_kpts_handle_list.clear()
@@ -475,6 +479,7 @@ class InteractionMeshRetargeter:
         if self.visualize:
             robot_dof = len(self.viser_robot.get_actuated_joint_limits())
 
+            _obs_pos = getattr(self.task_constants, "OBSTACLE_POS", None)
             create_motion_control_sliders(
                 server=self.server,
                 viser_robot=self.viser_robot,
@@ -484,6 +489,7 @@ class InteractionMeshRetargeter:
                 viser_object=self.viser_object,
                 object_base_frame=getattr(self, "object_base", None) if self.viser_object else None,
                 contains_object_in_qpos=bool(self.viser_object) and bool(self.has_dynamic_object),
+                static_object_pos=np.asarray(_obs_pos, dtype=float) if _obs_pos is not None else None,
                 initial_fps=30,
                 initial_interp_mult=2,
                 loop=False,
@@ -629,7 +635,7 @@ class InteractionMeshRetargeter:
                     ]
 
         # Non-penetration constraints
-        Js, phis = self._update_jacobians_and_phis_from_q(q)
+        Js, phis = self._update_jacobians_and_phis_from_q(q, include_object=self.activate_obj_non_penetration)
         for key, phi in phis.items():
             Ja_n_full = Js[key]
             Ja_n = Ja_n_full[self.q_a_indices]
@@ -679,7 +685,7 @@ class InteractionMeshRetargeter:
         # -------- Solve with Clarabel --------
         solver_kwargs = {"verbose": verbose}
         problem.solve(solver=cp.CLARABEL, **solver_kwargs)
-        if (problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)) and init_t:
+        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
             constraints = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
             problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
             problem.solve(solver=cp.CLARABEL, **solver_kwargs)
@@ -767,7 +773,9 @@ class InteractionMeshRetargeter:
                 object_pos = q[-7:-4]
             else:
                 object_quat = np.asarray([1, 0, 0, 0])
-                object_pos = np.zeros(3)
+                # Use OBSTACLE_POS from task_constants if available (static obstacle)
+                _obs_pos = getattr(self.task_constants, "OBSTACLE_POS", None)
+                object_pos = np.asarray(_obs_pos, dtype=float) if _obs_pos is not None else np.zeros(3)
 
             # Update object base frame
             self.object_base.position = object_pos
@@ -940,7 +948,7 @@ class InteractionMeshRetargeter:
 
         return candidates
 
-    def _update_jacobians_and_phis_from_q(self, q: np.ndarray):
+    def _update_jacobians_and_phis_from_q(self, q: np.ndarray, include_object: bool = True):
         self.robot_data.qpos[:] = q
 
         mujoco.mj_forward(self.robot_model, self.robot_data)  # kinematics & AABBs valid
@@ -962,16 +970,18 @@ class InteractionMeshRetargeter:
                 return False
             if contype[g2] == 0 and conaff[g2] == 0:
                 return False
+            has_obj = self.object_name in self._geom_names[g1] or self.object_name in self._geom_names[g2]
+            has_ground = "ground" in self._geom_names[g1] or "ground" in self._geom_names[g2]
+
             if self.object_name in self._geom_names[g1] and "ground" in self._geom_names[g2]:
                 return False
             if "ground" in self._geom_names[g1] and self.object_name in self._geom_names[g2]:
                 return False
-            return (
-                self.object_name in self._geom_names[g1]
-                or self.object_name in self._geom_names[g2]
-                or "ground" in self._geom_names[g1]
-                or "ground" in self._geom_names[g2]
-            )
+
+            if include_object:
+                return has_obj or has_ground
+
+            return has_ground
 
         for g1, g2 in candidates:
             # Optional: keep your own filters here (e.g., skip object-ground, only keep interaction with object/ground)
